@@ -1,0 +1,7 @@
+streamlit
+langchain
+vertexai
+google-cloud-aiplatform 
+google-cloud-discoveryengine 
+langchain-google-vertexai 
+langchain-google-community
