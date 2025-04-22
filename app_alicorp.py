@@ -1,75 +1,119 @@
+import os
 import streamlit as st
-import vertexai
-import google.auth
-from langchain.chains import RetrievalQA
-from langchain.memory import ConversationBufferMemory
-from langchain_google_community import VertexAISearchRetriever
+from crewai import Agent, Task, Crew, Process
+from google.cloud import bigquery
+from crewai.tools import BaseTool
 from langchain_google_vertexai import VertexAI
 
+# **Configuración de Streamlit**
+st.title("CrewAI con BigQuery")
+st.subheader("Generación y Ejecución de Consultas SQL")
 
-# Configuración de los parámetros
-PROJECT_ID = "acpe-dev-uc-gen-ai-babel"
-LOCATION = "global"
-MODEL = "gemini-1.5-pro"  # Modelo generativo
-DATA_STORE_ID = "datastore-alicorp-documentos_1735219596253"
-DATA_STORE_LOCATION = "global"
+# **Configuración del Modelo Gemini**
+MODEL = "gemini-1.5-pro"
+llm = VertexAI(model_name=MODEL)
 
-# Set Up Application Default Credentials (ADC)
-# This line retrieves credentials from the environment for authentication
-credentials, project_id = google.auth.default()
+# **Inicialización del Cliente de BigQuery (sin credenciales explícitas - asume SA)**
+try:
+    client = bigquery.Client()
+    st.success("Conexión a BigQuery establecida (usando Service Account).")
+except Exception as e:
+    st.error(f"Error al conectar a BigQuery: {e}")
+    st.stop()
 
-# Initialize Vertex AI with retrieved credentials
-vertexai.init(project=project_id, credentials=credentials)
+# **Definición de la Herramienta BigQueryTool**
+class BigQueryTool(BaseTool):
+    name: str = "execute_bigquery_query"
+    description: str = "Ejecuta una consulta SQL en BigQuery y devuelve los resultados."
 
-# Configurar el modelo de lenguaje y el recuperador
-llm = VertexAI(model_name=MODEL, languages=["es"])
+    def _run(self, query: str) -> str:
+        """Ejecuta una consulta SQL en BigQuery y devuelve los resultados."""
+        try:
+            query_job = client.query(query)
+            results = query_job.result()
+            # Formatear los resultados para una mejor visualización en Streamlit
+            results_list = [list(row.values()) for row in results]
+            if results.schema:
+                headers = [field.name for field in results.schema]
+                return {"headers": headers, "data": results_list}
+            else:
+                return str(results_list)
+        except Exception as e:
+            return f"Error al ejecutar la consulta: {e}"
 
-retriever = VertexAISearchRetriever(
-    project_id=PROJECT_ID,
-    location_id=DATA_STORE_LOCATION,
-    data_store_id=DATA_STORE_ID,
-    engine_data_type=0,  # 0 indica motores de búsqueda generativa
-)
+    async def _arun(self, query: str) -> str:
+        raise NotImplementedError("Esta herramienta no admite la ejecución asíncrona.")
 
-# Inicializar QA con recuperación
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    retriever=retriever,
-    return_source_documents=False  # Cambia a True si necesitas las fuentes
-)
+    def __init__(self):
+        super().__init__(name="execute_bigquery_query", description="Ejecuta una consulta SQL en BigQuery y devuelve los resultados.")
 
-# Crear la aplicación Streamlit
-def main():
-    st.title("AI Chatbot")
+# **Creación de la Instancia de la Herramienta**
+bigquery_tool = BigQueryTool()
 
-    # Estado de sesión para almacenar el historial de conversación
-    if "conversation_history" not in st.session_state:
-        st.session_state.conversation_history = []
+# **Función para Crear y Ejecutar la Tripulación (fuera del botón)**
+def run_crew():
+    
+    
+    # Crear el agente generador de consultas
+    query_generator_agent = Agent(
+        role="Generador de Consultas SQL",
+        goal="Generar consultas SQL precisas para BigQuery basadas en solicitudes.",
+        backstory="Eres un experto en SQL y BigQuery, capaz de generar consultas complejas.",
+        verbose=True,
+        llm=llm,
+    )
 
-    # Entrada de texto del usuario
-    with st.form(key="user_input_form"):
-        user_input = st.text_input("Escribe tu mensaje:", key="user_input")
-        send_button = st.form_submit_button("Enviar")
+    # Crear el agente ejecutor de consultas
+    query_executor_agent = Agent(
+        role="Ejecutor de Consultas BigQuery",
+        goal="Ejecutar consultas SQL en BigQuery y devolver los resultados.",
+        backstory="Eres un experto en BigQuery con amplia experiencia en análisis de datos.",
+        verbose=True,
+        llm=llm,
+        tools=[bigquery_tool],
+    )
+    
+    generate_query_task = Task(
+        description=f"""
+        Genera una consulta SQL para BigQuery que responda a la siguiente solicitud del usuario:
+        "{user_request}"
+        Asegúrate de que la consulta sea precisa, eficiente y válida para BigQuery.
+        """,
+        expected_output="Una consulta SQL válida para BigQuery.",
+        agent=query_generator_agent,
+    )
 
-    # Procesar la entrada del usuario
-    if send_button and user_input:
-        # Añadir la entrada del usuario al historial
-        st.session_state.conversation_history.append({"role": "user", "text": user_input})
+    execute_query_task = Task(
+        description="""
+        Ejecuta la consulta SQL generada por el otro agente en BigQuery y devuelve los resultados.
+        """,
+        expected_output="Resultados de la consulta SQL en formato de tabla o lista.",
+        agent=query_executor_agent  # Intentamos pasar el contexto aquí
+    )
 
-        # Generar respuesta usando el modelo
-        response = qa_chain.run(user_input)
+    crew = Crew(
+        agents=[query_generator_agent, query_executor_agent],
+        tasks=[generate_query_task, execute_query_task],
+        verbose=False,
+        process=Process.sequential,
+    )
 
-        # Añadir la respuesta del modelo al historial
-        st.session_state.conversation_history.append({"role": "ai", "text": response})
+    st.info("Ejecutando la tripulación...")
+    result = crew.kickoff()
+    return result
 
-    # Mostrar el historial de conversación
-    st.subheader("Historial de conversación")
-    for message in st.session_state.conversation_history:
-        if message["role"] == "user":
-            st.write(f"**Tú:** {message['text']}")
-        elif message["role"] == "ai":
-            st.write(f"**AI:** {message['text']}")
+# **Interfaz de Usuario en Streamlit**
+user_request = st.text_area("Introduce tu solicitud de consulta:", "Obtén los 5 primeros registros de la tabla `bcp-sofia-78147.alicorp_genia.archivo`.")
 
-# Ejecutar la aplicación
-if __name__ == "__main__":
-    main()
+if st.button("Ejecutar"):
+    if user_request:
+        # **Llamada a la función para ejecutar la tripulación y obtener resultados**
+        crew_result = run_crew()
+
+        st.subheader("Resultado:")
+        if isinstance(crew_result, dict) and "headers" in crew_result and "data" in crew_result:
+            st.table(crew_result)
+        else:
+            st.write(crew_result)
+    else:
+        st.warning("Por favor, introduce una solicitud de consulta.")
