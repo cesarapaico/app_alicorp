@@ -4,7 +4,7 @@ import google.auth
 from langchain_google_vertexai import VertexAI
 
 # Configuración de los parámetros
-PROJECT_ID = "acpe-dev-uc-gen-ai-babel"
+PROJECT_ID = "bcp-sofia-78147"
 LOCATION = "global"
 MODELOS = [
     "gemini-1.5-pro",
